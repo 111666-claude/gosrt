@@ -53,6 +53,12 @@ type Receiver interface {
 
 	// SetNAKInterval sets the interval between two periodic NAK messages to the sender in microseconds.
 	SetNAKInterval(nakInterval uint64)
+
+	// Drop gets called when the sender informs that it gave up on the packets
+	// in the given (inclusive) sequence number range, e.g. because they became
+	// too old. The receiver must not request the retransmission of these
+	// packets anymore and skip them for acknowledgement and delivery.
+	Drop(firstSequenceNumber, lastSequenceNumber circular.Number)
 }
 
 // SendStats are collected statistics from a sender

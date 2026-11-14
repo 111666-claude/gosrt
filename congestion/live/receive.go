@@ -441,6 +441,62 @@ func (r *receiver) SetNAKInterval(nakInterval uint64) {
 	r.periodicNAKInterval = nakInterval
 }
 
+// Drop implements the Receiver interface. The sender gave up on the packets
+// in the given (inclusive) sequence number range and will never (re)send
+// them. The dropped range is skipped for acknowledgement and delivery and
+// must not be part of any further NAK report.
+func (r *receiver) Drop(firstSequenceNumber, lastSequenceNumber circular.Number) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	// Ignore invalid ranges
+	if lastSequenceNumber.Lt(firstSequenceNumber) {
+		return
+	}
+
+	// Ignore repeated or too old drop requests that are already completely
+	// covered by the acknowledged sequence numbers.
+	if lastSequenceNumber.Lte(r.lastACKSequenceNumber) {
+		return
+	}
+
+	// Remove all packets from the buffer that are within the dropped range
+	// and haven't been acknowledged yet. They will never be delivered because
+	// the sender gave up on them. Already acknowledged packets stay in the
+	// buffer and will be delivered as usual. All other packets in the buffer
+	// are not touched.
+	for e := r.packetList.Front(); e != nil; {
+		next := e.Next()
+
+		p := e.Value.(packet.Packet)
+
+		if seq := p.Header().PacketSequenceNumber; seq.Gt(r.lastACKSequenceNumber) && seq.Gte(firstSequenceNumber) && seq.Lte(lastSequenceNumber) {
+			r.statistics.PktBuf--
+			r.statistics.ByteBuf -= p.Len()
+
+			r.statistics.PktDrop++
+			r.statistics.ByteDrop += p.Len()
+
+			r.packetList.Remove(e)
+
+			p.Decommission()
+		}
+
+		e = next
+	}
+
+	// Move the ACK position beyond the dropped range. This also stops any
+	// further NAK reports for the dropped sequence numbers because they are
+	// now behind the ACK position.
+	r.lastACKSequenceNumber = lastSequenceNumber
+
+	// If the dropped range reaches beyond what has been seen so far, catch
+	// up in order to not report the dropped range as a loss.
+	if r.maxSeenSequenceNumber.Lt(lastSequenceNumber) {
+		r.maxSeenSequenceNumber = lastSequenceNumber
+	}
+}
+
 func (r *receiver) String(t uint64) string {
 	var b strings.Builder
 

@@ -457,6 +457,350 @@ func TestRecvDropAlreadyRecvNoACK(t *testing.T) {
 	require.Equal(t, uint64(1), stats.PktDrop)
 }
 
+func mockLiveRecvWithInitial(initial uint32, onSendACK func(seq circular.Number, light bool), onSendNAK func(list []circular.Number), onDeliver func(p packet.Packet)) *receiver {
+	recv := NewReceiver(ReceiveConfig{
+		InitialSequenceNumber: circular.New(initial, packet.MAX_SEQUENCENUMBER),
+		PeriodicACKInterval:   10,
+		PeriodicNAKInterval:   20,
+		OnSendACK:             onSendACK,
+		OnSendNAK:             onSendNAK,
+		OnDeliver:             onDeliver,
+	})
+
+	return recv.(*receiver)
+}
+
+func pushPacket(recv *receiver, addr net.Addr, seq uint32, tsbpdTime uint64) {
+	p := packet.NewPacket(addr)
+	p.Header().PacketSequenceNumber = circular.New(seq, packet.MAX_SEQUENCENUMBER)
+	p.Header().PktTsbpdTime = tsbpdTime
+
+	recv.Push(p)
+}
+
+// The sender gives up on a gap of 2 packets after sequence number 101.
+// The receiver must advance its ACK position beyond the dropped range and
+// must not request the dropped packets again.
+func TestRecvDropRequest(t *testing.T) {
+	seqACK := uint32(0)
+	nakWords := 0
+	numbers := []uint32{}
+	recv := mockLiveRecvWithInitial(100,
+		func(seq circular.Number, light bool) {
+			seqACK = seq.Val()
+		},
+		func(list []circular.Number) {
+			nakWords += len(list)
+		},
+		func(p packet.Packet) {
+			numbers = append(numbers, p.Header().PacketSequenceNumber.Val())
+		},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Receive up to sequence number 101
+	for i := 100; i <= 101; i++ {
+		pushPacket(recv, addr, uint32(i), uint64(i+1))
+	}
+
+	recv.Tick(10) // ACK period
+
+	require.Equal(t, uint32(102), seqACK)
+	require.Equal(t, uint32(101), recv.lastACKSequenceNumber.Val())
+
+	// 104 arrives, leaving a gap of 2 packets (102, 103)
+	pushPacket(recv, addr, 104, 105)
+
+	require.Equal(t, 2, nakWords) // immediate NAK [102, 103]
+
+	recv.Tick(30) // ACK + NAK period
+
+	require.Equal(t, uint32(101), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, 4, nakWords) // repeated NAK [102, 103]
+
+	// The sender gives up on 102 and 103
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(103, packet.MAX_SEQUENCENUMBER))
+
+	recv.Tick(50) // ACK + NAK period
+
+	// The ACK position moved beyond the dropped range up to the received 104
+	require.Equal(t, uint32(104), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, uint32(105), seqACK)
+	// The dropped range is not requested again
+	require.Equal(t, 4, nakWords)
+
+	recv.Tick(110)
+
+	// 104 gets delivered, 102 and 103 never
+	require.Equal(t, []uint32{100, 101, 104}, numbers)
+}
+
+// Same as TestRecvDropRequest but with a gap of 1000 packets.
+func TestRecvDropRequestLargeGap(t *testing.T) {
+	seqACK := uint32(0)
+	nakWords := 0
+	recv := mockLiveRecvWithInitial(100,
+		func(seq circular.Number, light bool) {
+			seqACK = seq.Val()
+		},
+		func(list []circular.Number) {
+			nakWords += len(list)
+		},
+		nil,
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Receive up to sequence number 101
+	for i := 100; i <= 101; i++ {
+		pushPacket(recv, addr, uint32(i), uint64(i+1))
+	}
+
+	recv.Tick(10) // ACK period
+
+	require.Equal(t, uint32(101), recv.lastACKSequenceNumber.Val())
+
+	// 1102 arrives, leaving a gap of 1000 packets (102 - 1101)
+	pushPacket(recv, addr, 1102, 1103)
+
+	require.Equal(t, 2, nakWords) // immediate NAK [102, 1101]
+
+	recv.Tick(30) // ACK + NAK period
+
+	require.Equal(t, uint32(101), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, 4, nakWords) // repeated NAK [102, 1101]
+
+	// The sender gives up on 102 - 1101
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(1101, packet.MAX_SEQUENCENUMBER))
+
+	recv.Tick(50) // ACK + NAK period
+
+	// The ACK position moved beyond the dropped range up to the received 1102
+	require.Equal(t, uint32(1102), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, uint32(1103), seqACK)
+	// The dropped range is not requested again
+	require.Equal(t, 4, nakWords)
+}
+
+// The dropped range spans the sequence number wrap-around point.
+func TestRecvDropRequestBoundary(t *testing.T) {
+	nakWords := 0
+	recv := mockLiveRecvWithInitial(packet.MAX_SEQUENCENUMBER-1,
+		nil,
+		func(list []circular.Number) {
+			nakWords += len(list)
+		},
+		nil,
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	// Receive up to the maximum sequence number
+	pushPacket(recv, addr, packet.MAX_SEQUENCENUMBER-1, 1)
+	pushPacket(recv, addr, packet.MAX_SEQUENCENUMBER, 2)
+
+	recv.Tick(10) // ACK period
+
+	require.Equal(t, packet.MAX_SEQUENCENUMBER, recv.lastACKSequenceNumber.Val())
+
+	// 2 arrives (after wrap-around), leaving a gap of 2 packets (0, 1)
+	pushPacket(recv, addr, 2, 105)
+
+	require.Equal(t, 2, nakWords) // immediate NAK [0, 1]
+
+	recv.Tick(30) // ACK + NAK period
+
+	require.Equal(t, 4, nakWords) // repeated NAK [0, 1]
+
+	// The sender gives up on 0 and 1
+	recv.Drop(circular.New(0, packet.MAX_SEQUENCENUMBER), circular.New(1, packet.MAX_SEQUENCENUMBER))
+
+	recv.Tick(50) // ACK + NAK period
+
+	// The ACK position moved beyond the dropped range, across the wrap-around
+	require.Equal(t, uint32(2), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, 4, nakWords)
+}
+
+// Repeated, outdated, or invalid drop requests must not change the state
+// of the receiver.
+func TestRecvDropRequestStaleAndRepeated(t *testing.T) {
+	nakWords := 0
+	recv := mockLiveRecvWithInitial(100,
+		nil,
+		func(list []circular.Number) {
+			nakWords += len(list)
+		},
+		nil,
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	for i := 100; i <= 101; i++ {
+		pushPacket(recv, addr, uint32(i), uint64(i+1))
+	}
+
+	recv.Tick(10) // ACK period
+
+	pushPacket(recv, addr, 104, 105)
+
+	// The sender gives up on 102 and 103
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(103, packet.MAX_SEQUENCENUMBER))
+
+	recv.Tick(30) // ACK + NAK period
+
+	require.Equal(t, uint32(104), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, uint32(104), recv.maxSeenSequenceNumber.Val())
+	require.Equal(t, 2, nakWords) // only the immediate NAK, no periodic NAK
+
+	nPackets := recv.statistics.Pkt
+	nPktDrop := recv.statistics.PktDrop
+	lenPacketList := recv.packetList.Len()
+
+	// Repeating the same drop request is a no-op
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(103, packet.MAX_SEQUENCENUMBER))
+
+	// A drop request completely below the ACK position is a no-op
+	recv.Drop(circular.New(50, packet.MAX_SEQUENCENUMBER), circular.New(60, packet.MAX_SEQUENCENUMBER))
+
+	// A drop request ending at the ACK position is a no-op
+	recv.Drop(circular.New(100, packet.MAX_SEQUENCENUMBER), circular.New(104, packet.MAX_SEQUENCENUMBER))
+
+	// An invalid range is a no-op
+	recv.Drop(circular.New(103, packet.MAX_SEQUENCENUMBER), circular.New(102, packet.MAX_SEQUENCENUMBER))
+
+	require.Equal(t, uint32(104), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, uint32(104), recv.maxSeenSequenceNumber.Val())
+	require.Equal(t, nPackets, recv.statistics.Pkt)
+	require.Equal(t, nPktDrop, recv.statistics.PktDrop)
+	require.Equal(t, lenPacketList, recv.packetList.Len())
+
+	recv.Tick(50) // ACK + NAK period
+
+	require.Equal(t, uint32(104), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, 2, nakWords)
+}
+
+// A drop request must only affect the dropped range. Packets outside of the
+// range stay in the buffer and get delivered, other gaps are still reported,
+// and late or retransmitted packets are handled as usual.
+func TestRecvDropRequestKeepsBuffer(t *testing.T) {
+	seqNAK := []uint32{}
+	numbers := []uint32{}
+	recv := mockLiveRecvWithInitial(100,
+		nil,
+		func(list []circular.Number) {
+			seqNAK = []uint32{}
+			for _, sn := range list {
+				seqNAK = append(seqNAK, sn.Val())
+			}
+		},
+		func(p packet.Packet) {
+			numbers = append(numbers, p.Header().PacketSequenceNumber.Val())
+		},
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	for i := 100; i <= 101; i++ {
+		pushPacket(recv, addr, uint32(i), uint64(i+1))
+	}
+
+	recv.Tick(10) // ACK period
+
+	pushPacket(recv, addr, 104, 105) // gap of 102, 103
+	pushPacket(recv, addr, 105, 106)
+	pushPacket(recv, addr, 108, 109) // gap of 106, 107
+
+	// 102 arrives late and fills a part of the first gap
+	pushPacket(recv, addr, 102, 103)
+
+	require.Equal(t, 6, recv.packetList.Len()) // 100, 101, 102, 104, 105, 108
+
+	// The sender gives up on 102 and 103
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(103, packet.MAX_SEQUENCENUMBER))
+
+	// Only 102 has been removed from the buffer, everything else stays
+	require.Equal(t, 5, recv.packetList.Len()) // 100, 101, 104, 105, 108
+	require.Equal(t, uint64(1), recv.statistics.PktDrop)
+
+	recv.Tick(30) // ACK + NAK period
+
+	// The ACK position moved beyond the dropped range and the received 104, 105
+	require.Equal(t, uint32(105), recv.lastACKSequenceNumber.Val())
+	// The other gap is still reported
+	require.Equal(t, []uint32{106, 107}, seqNAK)
+
+	// A retransmitted 102 arrives too late and gets dropped
+	p := packet.NewPacket(addr)
+	p.Header().PacketSequenceNumber = circular.New(102, packet.MAX_SEQUENCENUMBER)
+	p.Header().PktTsbpdTime = 103
+	p.Header().RetransmittedPacketFlag = true
+
+	recv.Push(p)
+
+	require.Equal(t, uint64(2), recv.statistics.PktDrop)
+	require.Equal(t, 5, recv.packetList.Len())
+
+	// 106 arrives late and fills a part of the second gap
+	pushPacket(recv, addr, 106, 107)
+
+	require.Equal(t, 6, recv.packetList.Len())
+
+	recv.Tick(50) // ACK + NAK period
+
+	require.Equal(t, uint32(106), recv.lastACKSequenceNumber.Val())
+	// Only the still missing 107 is reported
+	require.Equal(t, []uint32{107, 107}, seqNAK)
+
+	recv.Tick(120)
+
+	// Everything except the dropped and lost packets gets delivered
+	require.Equal(t, []uint32{100, 101, 104, 105, 106, 108}, numbers)
+}
+
+// A drop request can cover packets that haven't been seen yet. Those must
+// not be reported as lost once later packets arrive.
+func TestRecvDropRequestBeyondSeen(t *testing.T) {
+	nakWords := 0
+	recv := mockLiveRecvWithInitial(100,
+		nil,
+		func(list []circular.Number) {
+			nakWords += len(list)
+		},
+		nil,
+	)
+
+	addr, _ := net.ResolveIPAddr("ip", "127.0.0.1")
+
+	for i := 100; i <= 101; i++ {
+		pushPacket(recv, addr, uint32(i), uint64(i+1))
+	}
+
+	recv.Tick(10) // ACK period
+
+	pushPacket(recv, addr, 104, 105) // gap of 102, 103
+
+	require.Equal(t, 2, nakWords) // immediate NAK [102, 103]
+
+	// The sender gives up on 102 - 200, reaching beyond what has been seen
+	recv.Drop(circular.New(102, packet.MAX_SEQUENCENUMBER), circular.New(200, packet.MAX_SEQUENCENUMBER))
+
+	require.Equal(t, uint32(200), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, uint32(200), recv.maxSeenSequenceNumber.Val())
+
+	// 201 arrives in order and must not trigger a NAK for the dropped range
+	pushPacket(recv, addr, 201, 202)
+
+	require.Equal(t, 2, nakWords)
+
+	recv.Tick(30) // ACK + NAK period
+
+	require.Equal(t, uint32(201), recv.lastACKSequenceNumber.Val())
+	require.Equal(t, 2, nakWords)
+}
+
 func TestRecvFlush(t *testing.T) {
 	recv := mockLiveRecv(
 		nil,

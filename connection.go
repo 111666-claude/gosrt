@@ -697,6 +697,8 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 			c.handleACK(p)
 		} else if header.ControlType == packet.CTRLTYPE_ACKACK {
 			c.handleACKACK(p)
+		} else if header.ControlType == packet.CRTLTYPE_DROPREQ {
+			c.handleDropRequest(p)
 		} else if header.ControlType == packet.CTRLTYPE_USER {
 			c.log("connection:recv:ctrl:user", func() string {
 				return fmt.Sprintf("got CTRLTYPE_USER packet, subType: %s", header.SubType)
@@ -908,6 +910,27 @@ func (c *srtConn) handleACK(p packet.Packet) {
 
 		c.sendACKACK(p.Header().TypeSpecific)
 	}
+}
+
+// handleDropRequest informs the receiving congestion control that the peer
+// gave up on a range of packets and will never (re)send them.
+func (c *srtConn) handleDropRequest(p packet.Packet) {
+	c.log("control:recv:DROPREQ:dump", func() string { return p.Dump() })
+
+	cif := &packet.CIFDropRequest{}
+
+	if err := p.UnmarshalCIF(cif); err != nil {
+		c.statisticsLock.Lock()
+		c.statistics.pktRecvInvalid++
+		c.statisticsLock.Unlock()
+		c.log("control:recv:DROPREQ:error", func() string { return fmt.Sprintf("invalid DROPREQ: %s", err) })
+		return
+	}
+
+	c.log("control:recv:DROPREQ:cif", func() string { return cif.String() })
+
+	// Inform congestion control about the dropped packets
+	c.recv.Drop(cif.FirstPacketSequenceNumber, cif.LastPacketSequenceNumber)
 }
 
 // handleNAK forwards the lost sequence number to the congestion control.

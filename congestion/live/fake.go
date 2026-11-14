@@ -180,3 +180,22 @@ func (r *fakeLiveReceive) SetNAKInterval(nakInterval uint64) {
 
 	r.periodicNAKInterval = nakInterval
 }
+
+func (r *fakeLiveReceive) Drop(firstSequenceNumber, lastSequenceNumber circular.Number) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	if lastSequenceNumber.Lt(firstSequenceNumber) {
+		return
+	}
+
+	if lastSequenceNumber.Lte(r.lastACKSequenceNumber) {
+		return
+	}
+
+	r.lastACKSequenceNumber = lastSequenceNumber
+
+	if r.maxSeenSequenceNumber.Lt(lastSequenceNumber) {
+		r.maxSeenSequenceNumber = lastSequenceNumber
+	}
+}
