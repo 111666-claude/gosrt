@@ -121,10 +121,10 @@ type listener struct {
 
 	config Config
 
-	backlog  chan packet.Packet
-	connReqs map[uint32]*connRequest
-	conns    map[uint32]*srtConn
-	lock     sync.RWMutex
+	backlog     chan packet.Packet
+	conns       map[uint32]*srtConn
+	connsByPeer map[peerKey]*srtConn
+	lock        sync.RWMutex
 
 	start time.Time
 
@@ -190,8 +190,8 @@ func Listen(network, address string, config Config) (Listener, error) {
 		return nil, fmt.Errorf("listen: no local address")
 	}
 
-	ln.connReqs = make(map[uint32]*connRequest)
 	ln.conns = make(map[uint32]*srtConn)
+	ln.connsByPeer = make(map[peerKey]*srtConn)
 
 	ln.backlog = make(chan packet.Packet, 128)
 
@@ -326,9 +326,10 @@ func (ln *listener) error() error {
 	return ln.doneErr
 }
 
-func (ln *listener) handleShutdown(socketId uint32) {
+func (ln *listener) handleShutdown(c *srtConn) {
 	ln.lock.Lock()
-	delete(ln.conns, socketId)
+	delete(ln.conns, c.socketId)
+	delete(ln.connsByPeer, newPeerKey(c.remoteAddr, c.peerSocketId))
 	ln.lock.Unlock()
 }
 
@@ -455,4 +456,23 @@ func (ln *listener) log(topic string, message func() string) {
 	}
 
 	ln.config.Logger.Print(topic, 0, 2, message)
+}
+
+// peerKey identifies a caller by its remote address and its own (peer) socket
+// ID. The peer socket ID alone is not unique: it is chosen by the caller, and
+// two independent callers (for example two devices running the same encoder)
+// can pick the same value. Keying on the address and the socket ID together
+// keeps retransmissions from one caller from blocking or hijacking another
+// caller's connection, while still recognizing repeats from the same caller.
+type peerKey struct {
+	addr     string
+	socketId uint32
+}
+
+func newPeerKey(addr net.Addr, socketId uint32) peerKey {
+	k := peerKey{socketId: socketId}
+	if addr != nil {
+		k.addr = addr.String()
+	}
+	return k
 }

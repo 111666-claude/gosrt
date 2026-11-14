@@ -601,6 +601,7 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 	defer func() { <-listenDone }()
 
 	singleReqReceived := make(chan struct{})
+	var once sync.Once
 
 	go func() {
 		defer close(listenDone)
@@ -613,93 +614,38 @@ func TestListenDiscardRepeatedHandshakes(t *testing.T) {
 				break
 			}
 
-			close(singleReqReceived)
+			// A retransmitted conclusion from the same caller must not be
+			// delivered more than once.
+			once.Do(func() { close(singleReqReceived) })
 			onlyRequest = req
 		}
 
-		onlyRequest.Reject(REJ_CLOSE)
+		if onlyRequest != nil {
+			onlyRequest.Reject(REJ_CLOSE)
+		}
 	}()
 
-	for i := 0; i < 4; i++ {
-		conn, err := net.Dial("udp", "127.0.0.1:6003")
-		require.NoError(t, err)
-		defer conn.Close()
+	// One single caller, as in a real high latency retransmission scenario.
+	conn, err := net.Dial("udp", "127.0.0.1:6003")
+	require.NoError(t, err)
+	defer conn.Close()
 
-		// send induction request
-		p := packet.NewPacket(conn.RemoteAddr())
-		p.Header().IsControlPacket = true
-		p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
-		p.Header().SubType = 0
-		p.Header().TypeSpecific = 0
-		p.Header().Timestamp = 0
-		p.Header().DestinationSocketId = 0
-		sendcif := &packet.CIFHandshake{
-			IsRequest:                   true,
-			Version:                     4,
-			EncryptionField:             0,
-			ExtensionField:              2,
-			InitialPacketSequenceNumber: circular.New(10000, packet.MAX_SEQUENCENUMBER),
-			MaxTransmissionUnitSize:     MAX_MSS_SIZE,
-			MaxFlowWindowSize:           25600,
-			HandshakeType:               packet.HSTYPE_INDUCTION,
-			SRTSocketId:                 55555,
-			SynCookie:                   0,
-		}
-		sendcif.PeerIP.FromNetAddr(conn.LocalAddr())
-		p.MarshalCIF(sendcif)
+	// Induction + first conclusion.
+	p, _ := sendHandshakePair(t, conn, 55555)
+
+	// Retransmit the same conclusion from the very same socket, exactly what
+	// a caller does when the response is delayed. None of these may produce an
+	// additional connection request.
+	for i := 0; i < 3; i++ {
 		var buf bytes.Buffer
-		err = p.Marshal(&buf)
-		require.NoError(t, err)
-		_, err = conn.Write(buf.Bytes())
-		require.NoError(t, err)
-
-		// read induction response
-		inbuf := make([]byte, 1024)
-		n, err := conn.Read(inbuf)
-		require.NoError(t, err)
-		p, err = packet.NewPacketFromData(conn.RemoteAddr(), inbuf[:n])
-		require.NoError(t, err)
-		recvcif := &packet.CIFHandshake{}
-		err = p.UnmarshalCIF(recvcif)
-		require.NoError(t, err)
-
-		// send conclusion
-		p.Header().IsControlPacket = true
-		p.Header().ControlType = packet.CTRLTYPE_HANDSHAKE
-		p.Header().SubType = 0
-		p.Header().TypeSpecific = 0
-		p.Header().Timestamp = 0
-		p.Header().DestinationSocketId = 0 // recvcif.SRTSocketId
-		sendcif.Version = 5
-		sendcif.ExtensionField = recvcif.ExtensionField
-		sendcif.HandshakeType = packet.HSTYPE_CONCLUSION
-		sendcif.SynCookie = recvcif.SynCookie
-		sendcif.HasHS = true
-		sendcif.SRTHS = &packet.CIFHandshakeExtension{
-			SRTVersion: SRT_VERSION,
-			SRTFlags: packet.CIFHandshakeExtensionFlags{
-				TSBPDSND:      true,
-				TSBPDRCV:      true,
-				CRYPT:         true, // must always set to true
-				TLPKTDROP:     true,
-				PERIODICNAK:   true,
-				REXMITFLG:     true,
-				STREAM:        false,
-				PACKET_FILTER: false,
-			},
-			RecvTSBPDDelay: uint16(120),
-			SendTSBPDDelay: uint16(120),
-		}
-		sendcif.HasSID = true
-		sendcif.StreamId = "foobar"
-		p.MarshalCIF(sendcif)
-		buf.Reset()
-		err = p.Marshal(&buf)
-		require.NoError(t, err)
+		require.NoError(t, p.Marshal(&buf))
 		_, err = conn.Write(buf.Bytes())
 		require.NoError(t, err)
 	}
 
 	<-singleReqReceived
+
+	// Give wrongly delivered duplicates time to surface before closing.
+	time.Sleep(500 * time.Millisecond)
 	ln.Close()
 }
