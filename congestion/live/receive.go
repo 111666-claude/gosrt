@@ -30,6 +30,11 @@ type receiver struct {
 	packetList                  *list.List
 	lock                        sync.RWMutex
 
+	// missingSequenceNumbers holds the sequence numbers that have been counted
+	// as presently missing (PktLoss) but have not shown up yet. It is used to
+	// correct the loss counters when a gap is filled, either in time or late.
+	missingSequenceNumbers map[uint32]struct{}
+
 	nPackets uint
 
 	periodicACKInterval uint64 // config
@@ -72,6 +77,7 @@ func NewReceiver(config ReceiveConfig) congestion.Receiver {
 		lastACKSequenceNumber:       config.InitialSequenceNumber.Dec(),
 		lastDeliveredSequenceNumber: config.InitialSequenceNumber.Dec(),
 		packetList:                  list.New(),
+		missingSequenceNumbers:      map[uint32]struct{}{},
 
 		periodicACKInterval: config.PeriodicACKInterval,
 		periodicNAKInterval: config.PeriodicNAKInterval,
@@ -129,6 +135,34 @@ func (r *receiver) Flush() {
 	defer r.lock.Unlock()
 
 	r.packetList = r.packetList.Init()
+	r.missingSequenceNumbers = map[uint32]struct{}{}
+}
+
+// removeMissing clears the given sequence number from the set of presently
+// missing packets. If the gap is recovered in time (recovered == true), the
+// tentative loss accounting is reversed because the packet was merely
+// reordered. If it arrives too late (recovered == false), the loss is
+// confirmed and the loss counters are left untouched.
+// avgPayloadSize is the estimate in effect when the gap was recorded, so that
+// the byte reversal exactly matches the earlier byte addition.
+func (r *receiver) removeMissing(seq circular.Number, recovered bool, avgPayloadSize uint64) {
+	if _, ok := r.missingSequenceNumbers[seq.Val()]; !ok {
+		return
+	}
+
+	delete(r.missingSequenceNumbers, seq.Val())
+
+	if recovered {
+		if r.statistics.PktLoss > 0 {
+			r.statistics.PktLoss--
+		}
+
+		if r.statistics.ByteLoss >= avgPayloadSize {
+			r.statistics.ByteLoss -= avgPayloadSize
+		} else {
+			r.statistics.ByteLoss = 0
+		}
+	}
 }
 
 func (r *receiver) Push(pkt packet.Packet) {
@@ -180,7 +214,10 @@ func (r *receiver) Push(pkt packet.Packet) {
 	}
 
 	//  5.1.2. SRT's Default LiveCC Algorithm
+	// Update the running average first, so that both recording a gap as missing
+	// and reversing that accounting when the gap is filled use the same estimate.
 	r.avgPayloadSize = 0.875*r.avgPayloadSize + 0.125*float64(pktLen)
+	avgPayloadSize := uint64(r.avgPayloadSize)
 
 	if pkt.Header().PacketSequenceNumber.Lte(r.lastDeliveredSequenceNumber) {
 		// Too old, because up until r.lastDeliveredSequenceNumber, we already delivered
@@ -190,6 +227,12 @@ func (r *receiver) Push(pkt packet.Packet) {
 		r.statistics.PktDrop++
 		r.statistics.ByteDrop += pktLen
 
+		// If this packet was previously counted as missing, its arrival after the
+		// playback deadline turns the tentative loss into a confirmed one. The
+		// packet must therefore be removed from the missing set without changing
+		// the loss counters, otherwise the single gap would be counted twice.
+		r.removeMissing(pkt.Header().PacketSequenceNumber, false, avgPayloadSize)
+
 		return
 	}
 
@@ -197,6 +240,11 @@ func (r *receiver) Push(pkt packet.Packet) {
 		// Already acknowledged, ignoring
 		r.statistics.PktDrop++
 		r.statistics.ByteDrop += pktLen
+
+		// ACKs may have passed over a gap, so this sequence number can still be
+		// tracked as missing. Drop it from the set without touching the loss
+		// counters because the loss has already been confirmed by the ACK.
+		r.removeMissing(pkt.Header().PacketSequenceNumber, false, avgPayloadSize)
 
 		return
 	}
@@ -216,12 +264,20 @@ func (r *receiver) Push(pkt packet.Packet) {
 
 				break
 			} else if p.Header().PacketSequenceNumber.Gt(pkt.Header().PacketSequenceNumber) {
-				// Late arrival, this fills a gap
+				// Late arrival that fills a gap reported as missing, while the
+				// playback of the stream has not passed this packet yet. The gap
+				// was therefore a reordering, not a loss: reverse the tentative
+				// loss accounting and record the recovered packet.
+				r.statistics.PktReordered++
+				r.statistics.ByteReordered += pktLen
+
 				r.statistics.PktBuf++
 				r.statistics.PktUnique++
 
 				r.statistics.ByteBuf += pktLen
 				r.statistics.ByteUnique += pktLen
+
+				r.removeMissing(pkt.Header().PacketSequenceNumber, true, avgPayloadSize)
 
 				r.packetList.InsertBefore(pkt, e)
 
@@ -238,9 +294,19 @@ func (r *receiver) Push(pkt packet.Packet) {
 			pkt.Header().PacketSequenceNumber.Dec(),
 		})
 
-		len := uint64(pkt.Header().PacketSequenceNumber.Distance(r.maxSeenSequenceNumber))
+		// The number of missing sequence numbers is the distance between the two
+		// received packets minus one: jumping from seq 2 to seq 4 leaves exactly
+		// one gap (seq 3), not two.
+		len := uint64(pkt.Header().PacketSequenceNumber.Distance(r.maxSeenSequenceNumber)) - 1
 		r.statistics.PktLoss += len
-		r.statistics.ByteLoss += len * uint64(r.avgPayloadSize)
+		r.statistics.ByteLoss += len * avgPayloadSize
+
+		// Remember every sequence number in the gap so that the tentative loss
+		// accounting can be corrected when the packet eventually shows up.
+		for i := uint64(0); i < len; i++ {
+			missing := r.maxSeenSequenceNumber.Add(uint32(i) + 1)
+			r.missingSequenceNumbers[missing.Val()] = struct{}{}
+		}
 
 		r.maxSeenSequenceNumber = pkt.Header().PacketSequenceNumber
 	}
@@ -308,6 +374,17 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 
 	ok = true
 	sequenceNumber = ackSequenceNumber.Inc()
+
+	// Every missing sequence number the ACK now points past has been skipped by
+	// the playback: it will never arrive in time, therefore its tentative loss
+	// becomes a confirmed one and is retired from the missing set.
+	if !ackSequenceNumber.Equals(r.lastACKSequenceNumber) {
+		for seq := range r.missingSequenceNumbers {
+			if circular.New(seq, packet.MAX_SEQUENCENUMBER).Lte(ackSequenceNumber) {
+				delete(r.missingSequenceNumbers, seq)
+			}
+		}
+	}
 
 	// Keep track of the last ACK's sequence number. With this we can faster ignore
 	// packets that come in late that have a lower sequence number.

@@ -101,6 +101,9 @@ type ReceiveStats struct {
 	PktLoss  uint64
 	ByteLoss uint64
 
+	PktReordered  uint64 // Number of packets that filled a previously detected gap before their playback deadline
+	ByteReordered uint64
+
 	PktRetrans  uint64
 	ByteRetrans uint64
 

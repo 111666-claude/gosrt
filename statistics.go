@@ -22,7 +22,8 @@ type StatisticsAccumulated struct {
 	PktSentUnique    uint64 // The total number of unique DATA packets sent by the SRT sender
 	PktRecvUnique    uint64 // The total number of unique original, retransmitted or recovered by the packet filter DATA packets received in time, decrypted without errors and, as a result, scheduled for delivery to the upstream application by the SRT receiver.
 	PktSendLoss      uint64 // The total number of data packets considered or reported as lost at the sender side. Does not correspond to the packets detected as lost at the receiver side.
-	PktRecvLoss      uint64 // The total number of SRT DATA packets detected as presently missing (either reordered or lost) at the receiver side
+	PktRecvLoss      uint64 // The total number of SRT DATA packets detected as presently missing (either reordered or lost) at the receiver side. A packet that fills a gap before its playback deadline is removed from this counter again, so that every gap is counted as one loss at most.
+	PktRecvReordered uint64 // The total number of packets that were first detected as missing and then arrived in time to be delivered, i.e. gaps that turned out to be reorderings instead of losses.
 	PktRetrans       uint64 // The total number of retransmitted packets sent by the SRT sender
 	PktRecvRetrans   uint64 // The total number of retransmitted packets registered at the receiver side
 	PktSentACK       uint64 // The total number of sent ACK (Acknowledgement) control packets
@@ -42,6 +43,7 @@ type StatisticsAccumulated struct {
 	ByteSentUnique    uint64 // Same as pktSentUnique, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvUnique    uint64 // Same as pktRecvUnique, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvLoss      uint64 // Same as pktRecvLoss, but expressed in bytes, including payload and all the headers (IP, TCP, SRT), bytes for the presently missing (either reordered or lost) packets' payloads are estimated based on the average packet size
+	ByteRecvReordered uint64 // Same as pktRecvReordered, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRetrans       uint64 // Same as pktRetrans, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvRetrans   uint64 // Same as pktRecvRetrans, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvBelated   uint64 // Same as pktRecvBelated, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
@@ -53,18 +55,19 @@ type StatisticsAccumulated struct {
 type StatisticsInterval struct {
 	MsInterval uint64 // Length of the interval, in milliseconds
 
-	PktSent        uint64 // Number of sent DATA packets, including retransmitted packets
-	PktRecv        uint64 // Number of received DATA packets, including retransmitted packets
-	PktSentUnique  uint64 // Number of unique DATA packets sent by the SRT sender
-	PktRecvUnique  uint64 // Number of unique original, retransmitted or recovered by the packet filter DATA packets received in time, decrypted without errors and, as a result, scheduled for delivery to the upstream application by the SRT receiver.
-	PktSendLoss    uint64 // Number of data packets considered or reported as lost at the sender side. Does not correspond to the packets detected as lost at the receiver side.
-	PktRecvLoss    uint64 // Number of SRT DATA packets detected as presently missing (either reordered or lost) at the receiver side
-	PktRetrans     uint64 // Number of retransmitted packets sent by the SRT sender
-	PktRecvRetrans uint64 // Number of retransmitted packets registered at the receiver side
-	PktSentACK     uint64 // Number of sent ACK (Acknowledgement) control packets
-	PktRecvACK     uint64 // Number of received ACK (Acknowledgement) control packets
-	PktSentNAK     uint64 // Number of sent NAK (Negative Acknowledgement) control packets
-	PktRecvNAK     uint64 // Number of received NAK (Negative Acknowledgement) control packets
+	PktSent          uint64 // Number of sent DATA packets, including retransmitted packets
+	PktRecv          uint64 // Number of received DATA packets, including retransmitted packets
+	PktSentUnique    uint64 // Number of unique DATA packets sent by the SRT sender
+	PktRecvUnique    uint64 // Number of unique original, retransmitted or recovered by the packet filter DATA packets received in time, decrypted without errors and, as a result, scheduled for delivery to the upstream application by the SRT receiver.
+	PktSendLoss      uint64 // Number of data packets considered or reported as lost at the sender side. Does not correspond to the packets detected as lost at the receiver side.
+	PktRecvLoss      uint64 // Number of SRT DATA packets detected as presently missing (either reordered or lost) at the receiver side. Gaps that are filled in time are removed again, so each gap counts as one loss at most.
+	PktRecvReordered uint64 // Number of packets that were first detected as missing and then arrived in time to be delivered (recovered reorderings).
+	PktRetrans       uint64 // Number of retransmitted packets sent by the SRT sender
+	PktRecvRetrans   uint64 // Number of retransmitted packets registered at the receiver side
+	PktSentACK       uint64 // Number of sent ACK (Acknowledgement) control packets
+	PktRecvACK       uint64 // Number of received ACK (Acknowledgement) control packets
+	PktSentNAK       uint64 // Number of sent NAK (Negative Acknowledgement) control packets
+	PktRecvNAK       uint64 // Number of received NAK (Negative Acknowledgement) control packets
 
 	MbpsSendRate float64 // Sending rate, in Mbps
 	MbpsRecvRate float64 // Receiving rate, in Mbps
@@ -82,6 +85,7 @@ type StatisticsInterval struct {
 	ByteSentUnique    uint64 // Same as pktSentUnique, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvUnique    uint64 // Same as pktRecvUnique, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvLoss      uint64 // Same as pktRecvLoss, but expressed in bytes, including payload and all the headers (IP, TCP, SRT), bytes for the presently missing (either reordered or lost) packets' payloads are estimated based on the average packet size
+	ByteRecvReordered uint64 // Same as pktRecvReordered, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRetrans       uint64 // Same as pktRetrans, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvRetrans   uint64 // Same as pktRecvRetrans, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)
 	ByteRecvBelated   uint64 // Same as pktRecvBelated, but expressed in bytes, including payload and all the headers (IP, TCP, SRT)

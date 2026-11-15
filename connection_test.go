@@ -565,3 +565,167 @@ func TestStats(t *testing.T) {
 	require.Equal(t, uint64(len(message)+44), statsWriter.Accumulated.ByteSent)
 	require.Equal(t, uint64(1), statsWriter.Accumulated.PktSent)
 }
+
+// TestStatsGapRecovery sends data over a real connection while dropping the
+// first original data packet on the publisher's send path. The NAK retransmission
+// recovers it in time at the receiving (server side) connection, so the single
+// gap must be reported as one recovered reordering rather than as a loss. The
+// interval counters must be consistent with the accumulated counters.
+func TestStatsGapRecovery(t *testing.T) {
+	message := "Hello World!"
+	channel := NewPubSub(PubSubConfig{})
+
+	config := DefaultConfig()
+
+	// The receiving end of the publishing connection is where the dropped packet
+	// shows up as a gap and is then recovered by the retransmission.
+	pubStats := Statistics{}
+	pubStatsReady := make(chan struct{})
+
+	server := Server{
+		Addr:   "127.0.0.1:6003",
+		Config: &config,
+		HandleConnect: func(req ConnRequest) ConnType {
+			streamid := req.StreamId()
+
+			if streamid == "publish" {
+				return PUBLISH
+			} else if streamid == "subscribe" {
+				return SUBSCRIBE
+			}
+
+			return REJECT
+		},
+		HandlePublish: func(conn Conn) {
+			channel.Publish(conn)
+
+			conn.Stats(&pubStats)
+			close(pubStatsReady)
+
+			conn.Close()
+		},
+		HandleSubscribe: func(conn Conn) {
+			channel.Subscribe(conn)
+
+			conn.Close()
+		},
+	}
+
+	err := server.Listen()
+	require.NoError(t, err)
+
+	defer server.Shutdown()
+
+	go func() {
+		err := server.Serve()
+		if err == ErrServerClosed {
+			return
+		}
+		require.NoError(t, err)
+	}()
+
+	readerConnected := make(chan struct{})
+	readerDone := make(chan struct{})
+
+	dataReader := bytes.Buffer{}
+
+	go func() {
+		defer close(readerDone)
+
+		config := DefaultConfig()
+		config.StreamId = "subscribe"
+
+		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		if !assert.NoError(t, err) {
+			panic(err.Error())
+		}
+
+		close(readerConnected)
+
+		buffer := make([]byte, 2048)
+
+		for {
+			n, err := conn.Read(buffer)
+			if n != 0 {
+				dataReader.Write(buffer[:n])
+			}
+
+			if err != nil {
+				break
+			}
+		}
+
+		require.NoError(t, conn.Close())
+	}()
+
+	<-readerConnected
+
+	writerDone := make(chan struct{})
+
+	go func() {
+		defer close(writerDone)
+
+		config := DefaultConfig()
+		config.StreamId = "publish"
+
+		conn, err := Dial("srt", "127.0.0.1:6003", config)
+		if !assert.NoError(t, err) {
+			panic(err.Error())
+		}
+
+		dialer, _ := conn.(*dialer)
+		originalOnSend := dialer.conn.onSend
+		dropped := false
+
+		// Drop the first original data packet exactly once; its retransmission
+		// must recover the gap in time.
+		dialer.conn.onSend = func(p packet.Packet) {
+			if !dropped && !p.Header().IsControlPacket && !p.Header().RetransmittedPacketFlag {
+				dropped = true
+				return
+			}
+
+			originalOnSend(p)
+		}
+
+		for range 10 {
+			n, err := conn.Write([]byte(message))
+			if !assert.NoError(t, err) {
+				panic(err.Error())
+			}
+			assert.Equal(t, 12, n)
+		}
+
+		time.Sleep(3 * time.Second)
+
+		assert.NoError(t, conn.Close())
+	}()
+
+	<-writerDone
+	<-readerDone
+	<-pubStatsReady
+
+	// Every message is recovered and delivered in order.
+	require.Equal(t, strings.Repeat(message, 10), dataReader.String())
+
+	acc := pubStats.Accumulated
+	interval := pubStats.Interval
+
+	// The single gap was a reordering recovered by retransmission, not a loss.
+	require.Equal(t, uint64(0), acc.PktRecvLoss, "a recovered gap must not remain a loss")
+	require.Equal(t, uint64(1), acc.PktRecvReordered, "the one gap is counted as a recovered reordering")
+	require.Equal(t, uint64(0), acc.PktRecvBelated)
+	require.Equal(t, uint64(0), acc.PktRecvDrop)
+	require.Equal(t, uint64(10), acc.PktRecvUnique)
+	require.GreaterOrEqual(t, acc.PktRecvRetrans, uint64(1), "the normal retransmission path is retained")
+
+	// Interval counters are derived from the accumulated counters; with no prior
+	// Stats snapshot the whole lifetime is one interval, so they must match.
+	require.Equal(t, acc.PktRecvLoss, interval.PktRecvLoss)
+	require.Equal(t, acc.PktRecvReordered, interval.PktRecvReordered)
+	require.Equal(t, acc.PktRecvBelated, interval.PktRecvBelated)
+	require.Equal(t, acc.PktRecvDrop, interval.PktRecvDrop)
+	require.Equal(t, acc.ByteRecvLoss, interval.ByteRecvLoss)
+	require.Equal(t, acc.ByteRecvReordered, interval.ByteRecvReordered)
+	require.Equal(t, acc.ByteRecvBelated, interval.ByteRecvBelated)
+}
