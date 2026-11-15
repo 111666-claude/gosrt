@@ -26,6 +26,20 @@ The Dial function connects to a server:
 
 	conn.Close()
 
+For setups with a primary and one or more backup SRT entry points,
+DialCandidates attempts several addresses and returns the first connection
+that completed the SRT handshake. Later candidates are attempted after an
+interval, so a primary that silently drops packets does not delay the
+startup:
+
+	conn, err := srt.DialCandidates("srt", []string{
+		"primary.example.com:6000",
+		"backup.example.com:6000",
+	}, srt.DefaultConfig(), 250*time.Millisecond)
+	if err != nil {
+		// handle error
+	}
+
 The Listen function creates servers:
 
 	ln, err := srt.Listen("srt", ":6000", srt.Config{...})

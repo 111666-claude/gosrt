@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `DialCandidates` and `DialCandidatesWithContext` to dial a list of
+  candidate addresses (for example a primary and a backup SRT entry point).
+  The first candidate is attempted immediately and every further candidate
+  after a configurable interval, or right away when an earlier attempt fails.
+  The result is the first connection that completed the SRT handshake; the
+  remaining attempts are canceled and their sockets closed. Invalid
+  addresses, duplicate addresses, and the failure of all candidates are
+  reported as distinct errors that name each candidate.
+
 ### Fixed
 
 - Honor received DROPREQ ranges in live mode so the receiver stops requesting

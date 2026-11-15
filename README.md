@@ -109,6 +109,43 @@ if err != nil {
 }
 ```
 
+## Multiple entry points
+
+Live setups often provide a primary and a backup SRT entry point. If the
+primary address silently drops packets (a blackhole), a plain `Dial` waits for
+the full connection timeout before it can be retried by the caller.
+`DialCandidates` takes several addresses and returns the first connection that
+completed the SRT handshake:
+
+```go
+import "github.com/datarhei/gosrt"
+
+conn, err := srt.DialCandidates("srt", []string{
+    "10.0.0.1:6000", // primary
+    "10.0.0.2:6000", // backup
+}, srt.DefaultConfig(), 250*time.Millisecond)
+if err != nil {
+    // handle error
+}
+```
+
+The primary is attempted immediately, the backup after the given interval, or
+right away if the primary fails. Every other attempt is canceled as soon as a
+candidate completed the handshake. An interval of zero attempts all candidates
+at once. Use `DialCandidatesWithContext` to cancel the entire dial.
+
+When no candidate completes the handshake, the error matches
+`ErrAllCandidatesFailed` and its message names each candidate and the reason it
+failed:
+
+```
+srt: all candidate addresses failed: 10.0.0.1:6000: connection timeout. server didn't respond; 10.0.0.2:6000: connection rejected: REJ_PEER
+```
+
+An invalid address makes `DialCandidates` fail with `ErrInvalidCandidate`
+before any connection is attempted; duplicates are attempted only once.
+`Dial` and `DialWithContext` are unchanged.
+
 ## Listener example
 
 ```go
