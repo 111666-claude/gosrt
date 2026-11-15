@@ -1687,6 +1687,12 @@ func (c *srtConn) Close() error {
 	return nil
 }
 
+// Done returns a channel that is closed once the connection has been
+// shut down, e.g. after Close, a peer shutdown, or a peer idle timeout.
+func (c *srtConn) Done() <-chan struct{} {
+	return c.ctx.Done()
+}
+
 // close closes the connection.
 func (c *srtConn) close() {
 

@@ -559,7 +559,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			logger:                      dl.config.Logger,
 		})
 
-		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
+		dl.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), RedactStreamId(conn.StreamId())) })
 
 		dl.connChan <- connResponse{
 			conn: conn,

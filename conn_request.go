@@ -448,7 +448,7 @@ func (req *connRequest) Accept() (Conn, error) {
 		logger:                      req.config.Logger,
 	})
 
-	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), conn.StreamId()) })
+	req.ln.log("connection:new", func() string { return fmt.Sprintf("%#08x (%s)", conn.SocketId(), RedactStreamId(conn.StreamId())) })
 
 	req.handshake.SRTSocketId = req.socketId
 	req.handshake.SynCookie = 0

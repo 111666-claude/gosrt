@@ -57,5 +57,40 @@ streamid with on which you can decide what mode (srt.ConnType) to return.
 
 Check out the Server type that wraps the Listen and Accept into a
 convenient framework for your own SRT server.
+
+# Structured streamid routing
+
+For servers that receive multiple named streams on a single listener,
+the Router type adds an optional routing layer on top of the Listener
+API. It parses structured streamids (srt.ParseStreamId), enforces one
+publisher per resource path plus a configurable subscriber quota during
+the handshake, and fans the published data out to the subscribers of
+the same path:
+
+	router := srt.NewRouter(srt.RouterConfig{
+		MaxSubscribersPerPath: 100,
+	})
+
+	for {
+		req, err := ln.Accept2()
+		if err != nil {
+			// handle error
+		}
+
+		go func() {
+			route, conn, err := router.Accept(req)
+			if err != nil {
+				// rejected during the handshake
+				return
+			}
+
+			router.Serve(route, conn)
+			conn.Close()
+		}()
+	}
+
+Clients publish with a streamid like "#!::m=publish,r=live/match1" and
+subscribe with "#!::m=request,r=live/match1". Credentials in streamids
+never appear in the router's logs.
 */
 package srt
