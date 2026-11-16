@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Conn.SubscribeStats` starts a cancellable periodic statistics
+  subscription. Each subscription samples the accumulated, interval and
+  instantaneous statistics on its own goroutine with its own interval and
+  bounded buffer, delivers them together with the wall-clock sampling time,
+  drops the oldest snapshot when a consumer falls behind, and stops when it
+  is cancelled or the connection is closed.
+
 ### Fixed
 
 - Honor received DROPREQ ranges in live mode so the receiver stops requesting

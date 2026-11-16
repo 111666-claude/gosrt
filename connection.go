@@ -67,6 +67,13 @@ type Conn interface {
 	// Stats returns accumulated and instantaneous statistics of the connection.
 	Stats(s *Statistics)
 
+	// SubscribeStats starts a periodic statistics subscription. Snapshots are
+	// delivered on a bounded channel, sampled on a separate goroutine so that
+	// sampling never blocks the send or receive path. Each subscription is
+	// independent and must be cancelled by the caller; it also terminates when
+	// the connection is closed.
+	SubscribeStats(config StatsSubscriptionConfig) (StatsSubscription, error)
+
 	// Version returns the connection version, either 4 or 5. With version 4, the streamid is not available
 	Version() uint32
 }
@@ -235,6 +242,9 @@ type srtConn struct {
 
 	statistics     connStats
 	statisticsLock sync.RWMutex
+
+	statsSubscriptionsLock sync.Mutex
+	statsSubscriptions     map[*statsSubscription]struct{}
 
 	logger Logger
 
@@ -1702,6 +1712,8 @@ func (c *srtConn) close() {
 		c.log("connection:close", func() string { return "stopping all routines and channels" })
 
 		c.cancelCtx()
+
+		c.stopStatsSubscriptions()
 
 		c.log("connection:close", func() string { return "flushing congestion" })
 

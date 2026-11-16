@@ -156,6 +156,51 @@ In the `contrib/server` directory you'll find a complete example of a SRT server
 this module provides the `Server` type which is a light framework for creating your own SRT server. The
 example server is based on this type.
 
+## Periodic statistics
+
+`Conn.Stats` fills a caller-provided `Statistics` value on demand. For
+monitoring a live stream every second, `Conn.SubscribeStats` samples the
+connection on a separate goroutine and delivers snapshots on a bounded
+channel, so that a slow consumer can never block the send or receive path:
+
+```go
+sub, err := conn.SubscribeStats(srt.StatsSubscriptionConfig{
+    Interval: time.Second,
+    Buffer:   60, // at most 60 queued snapshots
+})
+if err != nil {
+    // handle error
+}
+defer sub.Cancel()
+
+for snapshot := range sub.C() {
+    fmt.Printf("%s: %d packets lost, RTT %.1f ms\n",
+        snapshot.SampledAt.Format(time.RFC3339),
+        snapshot.Stats.Interval.PktRecvLoss,
+        snapshot.Stats.Instantaneous.MsRTT)
+}
+```
+
+Each snapshot carries the cumulative values in `Stats.Accumulated`, the
+deltas since the previous sample of the same subscription in
+`Stats.Interval`, and the instantaneous values (RTT, buffers, rates) in
+`Stats.Instantaneous`. Every subscription keeps its own interval counters
+and buffer, so any number of independent consumers can sample the same
+connection at their own rates.
+
+The `Buffer` is bounded (at most `srt.StatsSubscriptionMaxBuffer`). When a
+consumer falls behind, the oldest queued snapshot is dropped in favour of
+the newest one and `sub.Dropped()` counts the losses; the `Seq` field of the
+newest snapshot shows which sample was dropped. Sampling therefore never
+blocks and a slow consumer always observes the most recent state.
+
+`Cancel` stops the timer, closes the channel and releases the goroutine. It
+is idempotent and safe to call concurrently with `Conn.Close`; closing the
+connection also terminates every subscription and closes its channel. An
+interval shorter than `srt.StatsSubscriptionMinInterval` (1ms), in particular
+zero or a negative one, and a buffer outside `[1, StatsSubscriptionMaxBuffer]`
+are rejected with `ErrInvalidStatsInterval` and `ErrInvalidStatsBuffer`.
+
 ## Contributed client
 
 In the `contrib/client` directory you'll find an example implementation of a SRT client.

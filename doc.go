@@ -57,5 +57,32 @@ streamid with on which you can decide what mode (srt.ConnType) to return.
 
 Check out the Server type that wraps the Listen and Accept into a
 convenient framework for your own SRT server.
+
+# Periodic statistics
+
+Conn.Stats fills a caller-provided Statistics value on demand. For live
+monitoring, Conn.SubscribeStats samples the connection on a separate
+goroutine and delivers snapshots on a bounded channel:
+
+	sub, err := conn.SubscribeStats(srt.StatsSubscriptionConfig{
+		Interval: time.Second,
+		Buffer:   60,
+	})
+	if err != nil {
+		// handle error
+	}
+	defer sub.Cancel()
+
+	for s := range sub.C() {
+		// s.Stats.Accumulated, s.Stats.Interval, s.Stats.Instantaneous
+		// and s.SampledAt describe the sample.
+	}
+
+Each subscription has its own interval counters, buffer and timer, so
+several consumers can sample the same connection independently. Sampling
+never blocks the send or receive path; when a consumer is slower than the
+sampling interval, the oldest queued snapshot is dropped. Cancel stops the
+timer and closes the channel, and closing the connection terminates all
+subscriptions.
 */
 package srt

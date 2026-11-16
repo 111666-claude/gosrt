@@ -811,6 +811,17 @@ func (dl *dialer) Stats(s *Statistics) {
 	dl.conn.Stats(s)
 }
 
+func (dl *dialer) SubscribeStats(config StatsSubscriptionConfig) (StatsSubscription, error) {
+	dl.connLock.RLock()
+	defer dl.connLock.RUnlock()
+
+	if dl.conn == nil {
+		return newStatsSubscription(nil, config)
+	}
+
+	return dl.conn.SubscribeStats(config)
+}
+
 func (dl *dialer) log(topic string, message func() string) {
 	if dl.config.Logger == nil {
 		return
