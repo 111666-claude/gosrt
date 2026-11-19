@@ -811,6 +811,30 @@ func (dl *dialer) Stats(s *Statistics) {
 	dl.conn.Stats(s)
 }
 
+// RecvDeadlineEvents implements the Conn interface.
+func (dl *dialer) RecvDeadlineEvents() <-chan RecvDeadlineEvent {
+	dl.connLock.RLock()
+	defer dl.connLock.RUnlock()
+
+	if dl.conn == nil {
+		return nil
+	}
+
+	return dl.conn.RecvDeadlineEvents()
+}
+
+// RecvDeadlineEventsDropped implements the Conn interface.
+func (dl *dialer) RecvDeadlineEventsDropped() uint64 {
+	dl.connLock.RLock()
+	defer dl.connLock.RUnlock()
+
+	if dl.conn == nil {
+		return 0
+	}
+
+	return dl.conn.RecvDeadlineEventsDropped()
+}
+
 func (dl *dialer) log(topic string, message func() string) {
 	if dl.config.Logger == nil {
 		return

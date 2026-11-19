@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Receive deadline audit. Setting `Config.RecvDeadlineAudit` to a queue
+  capacity enables one `RecvDeadlineEvent` per received data packet on the
+  channel returned by `Conn.RecvDeadlineEvents`, reporting the packet
+  sequence number, media timestamp, scheduled TSBPD delivery time, and
+  whether the packet was delivered on time, late, or dropped. The queue is
+  bounded; events that don't fit are discarded and counted by
+  `Conn.RecvDeadlineEventsDropped`.
+
 ### Fixed
 
 - Honor received DROPREQ ranges in live mode so the receiver stops requesting

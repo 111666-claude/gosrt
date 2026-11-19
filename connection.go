@@ -67,6 +67,17 @@ type Conn interface {
 	// Stats returns accumulated and instantaneous statistics of the connection.
 	Stats(s *Statistics)
 
+	// RecvDeadlineEvents returns the channel of the receive deadline audit
+	// events, one event per received data packet. It returns nil if the
+	// audit is not enabled (see Config.RecvDeadlineAudit). The channel is
+	// closed when the connection is closed.
+	RecvDeadlineEvents() <-chan RecvDeadlineEvent
+
+	// RecvDeadlineEventsDropped returns the number of receive deadline audit
+	// events that were discarded because the event queue was full, i.e. the
+	// consumer was too slow.
+	RecvDeadlineEventsDropped() uint64
+
 	// Version returns the connection version, either 4 or 5. With version 4, the streamid is not available
 	Version() uint32
 }
@@ -225,6 +236,9 @@ type srtConn struct {
 	recv congestion.Receiver
 	snd  congestion.Sender
 
+	// Receive deadline audit, nil if not enabled
+	audit *recvAudit
+
 	// FEC
 	fecGen *fec.Generator
 	fecRec *fec.Reconstructor
@@ -365,6 +379,10 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		OnDeliver:             c.pop,
 	})
 
+	if c.config.RecvDeadlineAudit > 0 {
+		c.audit = newRecvAudit(c.config.RecvDeadlineAudit, c.config.FC)
+	}
+
 	if len(c.config.PacketFilter) > 0 {
 		fecCfg, err := fec.ParseConfig(c.config.PacketFilter)
 		if err == nil {
@@ -438,6 +456,24 @@ func (c *srtConn) StreamId() string {
 
 func (c *srtConn) Version() uint32 {
 	return c.version
+}
+
+// RecvDeadlineEvents implements the Conn interface.
+func (c *srtConn) RecvDeadlineEvents() <-chan RecvDeadlineEvent {
+	if c.audit == nil {
+		return nil
+	}
+
+	return c.audit.events
+}
+
+// RecvDeadlineEventsDropped implements the Conn interface.
+func (c *srtConn) RecvDeadlineEventsDropped() uint64 {
+	if c.audit == nil {
+		return 0
+	}
+
+	return c.audit.droppedEvents.Load()
 }
 
 // ticker invokes the congestion control in regular intervals with
@@ -721,12 +757,19 @@ func (c *srtConn) writeQueueReader(ctx context.Context) {
 
 // deliver writes the packets to the read queue in order to be consumed by the Read function.
 func (c *srtConn) deliver(p packet.Packet) {
+	delivered := false
+
 	// Non-blocking write to the read queue
 	select {
 	case <-c.ctx.Done():
 	case c.readQueue <- p:
+		delivered = true
 	default:
 		c.log("connection:error", func() string { return "readQueue was blocking, dropping packet" })
+	}
+
+	if c.audit != nil {
+		c.audit.deliver(p.Header().PacketSequenceNumber, delivered, time.Now())
 	}
 }
 
@@ -845,6 +888,10 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	header.PktTsbpdTime = uint64(int64(c.tsbpdTimeBase+tsbpdTimeBaseOffset+uint64(header.Timestamp)+c.tsbpdDelay) + c.tsbpdPeerOffset + c.tsbpdDrift)
 
+	if c.audit != nil {
+		c.audit.register(header.PacketSequenceNumber, header.Timestamp, c.tsbpdDeadline(header.PktTsbpdTime), time.Now())
+	}
+
 	c.log("data:recv:dump", func() string { return p.Dump() })
 
 	c.cryptoLock.Lock()
@@ -867,6 +914,13 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 
 	// Put the packet into receive congestion control
 	c.recv.Push(p)
+}
+
+// tsbpdDeadline converts a TSBPD time (microseconds on the connection time
+// base) to a local time. The result carries the monotonic clock reading of
+// the connection start, so it is not affected by wall clock adjustments.
+func (c *srtConn) tsbpdDeadline(pktTsbpdTime uint64) time.Time {
+	return c.start.Add(time.Duration(int64(pktTsbpdTime)-int64(c.tsbpdTimeBase)) * time.Microsecond)
 }
 
 // getTsbpdTimeBaseOffset returns the offset to the TSBPD time base for a packet with the given timestamp,
@@ -1707,6 +1761,10 @@ func (c *srtConn) close() {
 
 		c.snd.Flush()
 		c.recv.Flush()
+
+		if c.audit != nil {
+			c.audit.close()
+		}
 
 		c.log("connection:close", func() string { return "shutdown" })
 

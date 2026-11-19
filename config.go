@@ -153,6 +153,18 @@ type Config struct {
 	// SRTO_RCVLATENCY
 	ReceiverLatency time.Duration
 
+	// RecvDeadlineAudit enables the receive deadline audit and sets the
+	// capacity of its event queue in packets. When enabled, every received
+	// data packet produces exactly one RecvDeadlineEvent on the channel
+	// returned by Conn.RecvDeadlineEvents, telling whether the packet was
+	// delivered on time, late, or dropped against its TSBPD delivery
+	// deadline. Events are emitted in delivery order. If the consumer is
+	// slower than the stream and the queue fills up, new events are
+	// discarded and counted by Conn.RecvDeadlineEventsDropped. 0 (the
+	// default) disables the audit. This is a local option, it is not
+	// negotiated with the peer.
+	RecvDeadlineAudit uint32
+
 	// Sender buffer size. Bytes.
 	// SRTO_SNDBUF
 	SendBufferSize uint32
